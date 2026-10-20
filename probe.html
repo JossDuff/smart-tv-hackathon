@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><title>probe</title></head>
+<body style="background:#222;color:#fff;font:24px monospace;padding:24px">
+<h2>PROBE 1</h2>
+<div id="s">testing...</div>
+<script>
+function post(tag, val){ document.getElementById("s").innerHTML += "<br>"+tag+": "+val; }
+try {
+  var syms = Object.getOwnPropertySymbols(window).map(String);
+  var hs = syms.filter(function(s){return s.indexOf("Hisense")>-1});
+  post("Hisense_* symbols", hs.length ? hs.join(", ") : "NONE");
+} catch(e){ post("symbol enum error", e.message); }
+try { post("typeof File", typeof File); } catch(e){}
+try {
+  var r = File.read("launcher/Appinfo.json", 1);
+  post("File.read result", String(r).substring(0,200));
+} catch(e){ post("File.read error", e.message); }
+try { post("typeof Hisense_installApp", typeof (typeof Hisense_installApp!=="undefined"?Hisense_installApp:"undef")); } catch(e){ post("fn check err", e.message); }
+</script>
+</body></html>

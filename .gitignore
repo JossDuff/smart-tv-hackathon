@@ -1,0 +1,18 @@
+# Captures (packet/network captures)
+*.pcap
+*.pcapng
+*.cap
+
+# Pictures / screenshots
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.webp
+snaps/
+
+# Other large files/folders over 1MB
+clip.mp4
+fw/
+handoff/

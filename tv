@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# tv: drive the lab Hisense TV (s-hisensetv-2) over IR through the mrg-iot testbed.
+#
+# usage:
+#   tv up down select            send presses in order (one SSH session for all of them)
+#   tv downx6 ok                 repeat a button N times (also "down x6", "6down", "down\*6")
+#   tv home -s                   -s / --snap: grab a camera snapshot after the presses
+#   tv snap [name]               just take a snapshot -> snaps/<name>.jpg
+#   tv hold power 3              hold a button for N seconds
+#   tv -i                        interactive mode: arrow keys, Enter, h=home, b=back, q=quit
+#   tv buttons                   list buttons the testbed knows
+#   tv power                     NOTE: IR power toggle, not the mains relay
+#   tv mains-on | mains-off      hard cut via the testbed's mains relay
+#
+# buttons: up down left right ok/select/enter/accept back home menu input/source
+#          play pause chup/ch_up chdown/ch_down power 0-9
+# env: TV_DEV (default s-hisensetv-2), TV_DRY=1 prints commands instead of sending
+set -euo pipefail
+
+DEV="${TV_DEV:-s-hisensetv-2}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SNAPDIR="$HERE/snaps"
+
+die() { echo "tv: $*" >&2; exit 1; }
+
+# Map friendly names to the testbed's IR button names.
+button() {
+  case "${1,,}" in
+    up|u) echo up ;;
+    down|d) echo down ;;
+    left|l) echo left ;;
+    right|r) echo right ;;
+    ok|select|sel|enter|accept|a) echo accept ;;
+    back|b|esc) echo back ;;
+    home|h) echo home ;;
+    menu|m) echo menu ;;
+    input|source|src) echo input ;;
+    play) echo play ;;
+    pause) echo pause ;;
+    chup|ch_up|ch+) echo ch_up ;;
+    chdown|ch_down|ch-) echo ch_down ;;
+    power|pwr) echo power ;;
+    [0-9]) echo "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Run testbed commands. Each arg is one "<dev> <cmd>" line; all go in one session.
+run() {
+  if [ "${TV_DRY:-0}" = 1 ]; then printf "  [dry] %s\n" "$@"; return 0; fi
+  mrg-iot cmd run "$@" 2>&1 \
+    | grep -v -e '^Command .* returned:$' -e '^\s*$' || true
+}
+
+snap() {
+  local name="${1:-$(date +%H%M%S)}"
+  mkdir -p "$SNAPDIR"
+  local out="$SNAPDIR/$name.jpg" log
+  log="$(mktemp)"
+  mrg-iot stream url >"$log" 2>&1 &
+  local p=$!
+  local url=""
+  for _ in $(seq 1 30); do
+    url="$(grep -o 'rtsp://[^ ]*' "$log" | head -1 || true)"
+    [ -n "$url" ] && break
+    sleep 1
+  done
+  [ -n "$url" ] || { kill "$p" 2>/dev/null; die "could not get camera URL"; }
+  sleep 2
+  timeout 40 ffmpeg -y -loglevel fatal -rtsp_transport tcp -i "$url" -frames:v 1 -q:v 2 "$out" || true
+  kill "$p" 2>/dev/null; wait "$p" 2>/dev/null || true
+  rm -f "$log"
+  [ -s "$out" ] || die "snapshot failed"
+  echo "$out"
+}
+
+# Expand "down*6", "downx6", "down x6", "6down" into a list of presses.
+expand() {
+  local out=() tok n b
+  while [ $# -gt 0 ]; do
+    tok="$1"; shift
+    n=1
+    if [[ "$tok" =~ ^([a-zA-Z_+-]+)[*xX]([0-9]+)$ ]]; then
+      tok="${BASH_REMATCH[1]}"; n="${BASH_REMATCH[2]}"
+    elif [[ "$tok" =~ ^([a-zA-Z_+-]+)$ ]] && [ $# -gt 0 ] && [[ "$1" =~ ^[xX*]([0-9]+)$ ]]; then
+      n="${BASH_REMATCH[1]}"; shift
+    elif [[ "$tok" =~ ^([0-9]+)([a-zA-Z_+-]+)$ ]]; then
+      n="${BASH_REMATCH[1]}"; tok="${BASH_REMATCH[2]}"
+    fi
+    b="$(button "$tok")" || die "unknown button '$tok' (try: tv buttons)"
+    for _ in $(seq 1 "$n"); do out+=("$b"); done
+  done
+  printf '%s\n' "${out[@]}"
+}
+
+press_all() {
+  local cmds=() b
+  for b in "$@"; do cmds+=("$DEV send_ir $b"); done
+  [ ${#cmds[@]} -gt 0 ] || return 0
+  echo "-> ${*}"
+  run "${cmds[@]}"
+}
+
+interactive() {
+  cat <<'H'
+interactive: arrows=move  Enter=ok  Backspace/b=back  h=home  m=menu  i=input
+             p=play  space=pause  0-9=digits  s=snapshot  q=quit   (each press ~5s)
+H
+  local key rest
+  while true; do
+    IFS= read -rsn1 key || break
+    if [ "$key" = $'\e' ]; then
+      read -rsn2 -t 0.1 rest || true
+      case "$rest" in
+        '[A') press_all up ;; '[B') press_all down ;;
+        '[C') press_all right ;; '[D') press_all left ;;
+        *) echo "quit"; break ;;
+      esac
+      continue
+    fi
+    case "$key" in
+      ''|$'\n') press_all accept ;;
+      $'\x7f'|$'\b'|b) press_all back ;;
+      h) press_all home ;; m) press_all menu ;; i) press_all input ;;
+      p) press_all play ;; ' ') press_all pause ;;
+      [0-9]) press_all "$key" ;;
+      s) snap ;;
+      q) echo "quit"; break ;;
+      *) echo "? ($key)" ;;
+    esac
+  done
+}
+
+[ $# -gt 0 ] || { sed -n '2,/^set -e/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'; exit 0; }
+
+do_snap=0
+args=()
+for a in "$@"; do
+  case "$a" in
+    -s|--snap) do_snap=1 ;;
+    -h|--help) exec "$0" ;;
+    *) args+=("$a") ;;
+  esac
+done
+set -- "${args[@]+"${args[@]}"}"
+
+case "${1:-}" in
+  snap) snap "${2:-}" ; exit ;;
+  buttons|list) run "$DEV ir_cmds"; exit ;;
+  hold) b="$(button "${2:-}")" || die "unknown button '${2:-}'"
+        echo "-> hold $b ${3:-1}s"; run "$DEV hold_ir $b ${3:-1}" ;;
+  mains-on) run "$DEV power_on" ;;
+  mains-off) run "$DEV power_off" ;;
+  watts) run "$DEV get_power_consumption" ;;
+  -i|interactive) interactive; exit ;;
+  *) plist="$(expand "$@")" || exit 1
+     mapfile -t presses <<<"$plist"; press_all "${presses[@]}" ;;
+esac
+
+if [ "$do_snap" = 1 ]; then
+  sleep 5
+  snap
+fi
